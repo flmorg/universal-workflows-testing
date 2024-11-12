@@ -1,0 +1,111 @@
+on:
+  workflow_call:
+    inputs:
+      githubContext: # github context in JSON format
+        required: true
+        type: string
+      chartRepo:
+        required: true
+        type: string
+      chartName:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      valuesPath:
+        required: true
+        type: string
+      releaseName:
+        required: true
+        type: string
+
+jobs:
+  install_chart:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Initialize chart info
+        timeout-minutes: 1
+        run: |
+          githubRef=${{ fromJSON(inputs.githubContext).head_ref }}
+          branch=${githubRef##*/}
+          githubRepositoryName=$(basename ${{ fromJSON(inputs.githubContext).repository }})
+
+          echo "branch=$branch" >> $GITHUB_ENV
+          echo 'githubRepository=${{ fromJSON(inputs.githubContext).repository }}' >> $GITHUB_ENV
+          echo "githubRepositoryName=$githubRepositoryName" >> $GITHUB_ENV
+      -
+        name: Checkout target repository
+        uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          repository: ${{ env.githubRepository }}
+          ref: ${{ env.branch }}
+          token: ${{ secrets.REPO_READONLY_PAT }}
+      -
+        name: Find vault secrets
+        timeout-minutes: 2
+        run: |
+          # find all "@vault(path/to/secret key | ENV_VAR_KEY)" templates and output them as list of "path/to/secret key | ENV_VAR_KEY;"
+          VAULT_SECRETS=$(grep -oP '@vault\([^)]+\)' ${{ inputs.valuesPath }} | sed 's/@vault(//;s/)//' | awk -F'/' '{print $1"/"$2"/"$3" "$4}' | sed 's/ |/ |/' | tr '\n' ';')
+          echo "VAULT_SECRETS=$VAULT_SECRETS" >> $GITHUB_ENV
+          
+          # replace all "@vault(path/to/secret key | ENV_VAR_KEY)" with their env var key
+          sed -i.bak -E 's/@vault\(([^|]+) \| ([^)]+)\)/$\2/g' ${{ inputs.valuesPath }}
+      -
+        name: Retrieve vault secrets
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_HOST }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets:
+            ${{ env.VAULT_SECRETS }}
+      -
+        name: Replace secrets in values file
+        timeout-minutes: 1
+        run: |
+          originalfile="${{ inputs.valuesPath }}"
+          tmpfile=$(mktemp)
+          cp --preserve=mode,ownership,timestamps $originalfile $tmpfile
+          envsubst "$(env | sed -e 's/=.*//' -e 's/^/\$/g')" < $originalfile > $tmpfile
+          mv $tmpfile $originalfile
+      -
+        name: Install helm
+        timeout-minutes: 2
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      -
+        name: Create kubeconfig
+        id: kubeconfig
+        uses: timheuer/base64-to-file@v1.2
+        timeout-minutes: 1
+        with:
+          fileName: './kubeconfig'
+          encodedString: ${{ secrets.KUBECONFIG }}
+      -
+        name: Upgrade chart
+        timeout-minutes: 5
+        env:
+          KUBECONFIG: ${{ steps.kubeconfig.outputs.filePath }}
+        run: |
+          if [[ "${{ inputs.chartRepo }}" == oci://* ]]; then
+            # Upgrade using the OCI repository
+            chart_ref="${{ inputs.chartRepo }}/${{ inputs.chartName }}"
+          else
+            # Add the Helm repository and use the traditional chart reference
+            helm repo add chart ${{ inputs.chartRepo }}
+            helm repo update
+            chart_ref="chart/${{ inputs.chartName }}"
+          fi
+      
+          helm upgrade ${{ env.githubRepositoryName }}-${{ inputs.releaseName }} "$chart_ref" \
+            --kubeconfig $KUBECONFIG \
+            --install \
+            --namespace ${{ env.githubRepositoryName }} \
+            --create-namespace \
+            --version=${{ inputs.version }} \
+            --values=${{ inputs.valuesPath }} \
+            --debug 

@@ -1,0 +1,133 @@
+on:
+  workflow_call:
+    inputs:
+      githubContext: # github context in JSON format
+        required: true
+        type: string
+      dotnetVersion:
+        required: false
+        type: string
+        default: 7.x
+      major:
+        required: false
+        type: boolean
+        default: false
+      minor:
+        required: false
+        type: boolean
+        default: false
+      patch:
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Exit if the autor is GitHub Actions
+        if: fromJSON(inputs.githubContext).actor == 'GitHub Actions'
+        timeout-minutes: 1
+        run: |
+          echo "Pipeline stopped because the autor was GitHub Actions"
+          exit
+      -
+        name: Exit if event was not a push to main branch
+        if: fromJSON(inputs.githubContext).head_ref != 'main'
+        timeout-minutes: 1
+        run: |
+          echo "Pipeline stopped because the event was not a push to main branch"
+          exit
+      # TODO check for modified directory
+      # -
+      #   name: Exit if push event does not include changes in code directory
+      #   run: |
+      #     modified_files=$(jq -r '.[].modified | join(" ")' < '${{ github.event.workflow_run.event_path }}')
+
+      #     # Check whether the list of modified files contains the 'code' directory
+      #     if ! echo "$modified_files" | grep -q 'code/'; then
+      #       echo "Pipeline stopped because the event did not contain changes to the code directory"
+      #       exit
+      #     fi
+      -
+        name: Set github context
+        timeout-minutes: 1
+        run: |
+          repoFullName=${{ fromJSON(inputs.githubContext).repository }}
+          
+          echo 'githubRepository=${{ fromJSON(inputs.githubContext).repository }}' >> $GITHUB_ENV
+          echo "githubRepositoryName=${repoFullName#*/}" >> $GITHUB_ENV
+      -
+        uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          repository: ${{ env.githubRepository }}
+      -
+        name: Set git configuration
+        timeout-minutes: 1
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git remote set-url origin https://x-access-token:${{ env.REPO_WRITE_PAT }}@github.com/${{ env.githubRepository }}.git
+      -
+        name: Setup .NET for version bump
+        uses: actions/setup-dotnet@v2
+        timeout-minutes: 1
+        with:
+          dotnet-version: 3.1.x
+      -
+        name: Set package version
+        timeout-minutes: 1
+        working-directory: code/${{ env.githubRepositoryName }}
+        run: |
+          dotnet tool install --global Frogvall.DotnetBumpVersion --version 3.0.3
+
+          if grep -q '<Version>' *.csproj; then
+            versionToBump="";
+
+            if [ "${{ inputs.major }}" = true ] ; then
+              versionToBump="major"
+            elif [ "${{ inputs.minor }}" = true ] ; then
+              versionToBump="minor"
+            elif [ "${{ inputs.patch }}" = true ] ; then
+              versionToBump="patch"
+            fi
+
+            echo "commitMessage='Bump NuGet package version'" >> $GITHUB_ENV
+            bump-version $versionToBump
+          else
+            echo "commitMessage='Set initial NuGet package version'" >> $GITHUB_ENV
+            bump-version major --value 1
+          fi
+      -
+        name: Setup .NET for package
+        uses: actions/setup-dotnet@v2
+        timeout-minutes: 1
+        with:
+          dotnet-version: ${{ inputs.dotnetVersion }}
+          source-url: https://nuget.pkg.github.com/Flaminel/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ env.PACKAGES_PAT }}
+      -
+        name: Generate package
+        timeout-minutes: 2
+        working-directory: code/${{ env.githubRepositoryName }}
+        run: |
+          dotnet pack -c Release -o out \
+            -p:IncludeSymbols=true \
+            -p:SymbolPackageFormat=snupkg
+      -
+        name: Publish package
+        timeout-minutes: 1
+        working-directory: code/${{ env.githubRepositoryName }}
+        run: |
+          dotnet nuget push ./out/*.nupkg --api-key ${{ env.PACKAGES_PAT }}
+      -
+        name: Commit and push version bump
+        timeout-minutes: 1
+        working-directory: code/${{ env.githubRepositoryName }}
+        run: |
+          git add .
+          git commit -am ${{ env.commitMessage }}
+          git push

@@ -1,0 +1,110 @@
+on:
+  workflow_call:
+    inputs:
+      githubContext: # github context in JSON format
+        required: true
+        type: string
+      useChartMuseum:
+        required: false
+        type: boolean
+        default: true
+      forceRedeploy: # should be set to true after build to redeploy the latest image tag
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  install_chart:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Initialize chart info
+        timeout-minutes: 1
+        run: |
+          githubRef=${{ fromJSON(inputs.githubContext).head_ref }}
+          branch=${githubRef##*/}
+          githubRepositoryName=$(basename ${{ fromJSON(inputs.githubContext).repository }})
+
+          echo "branch=$branch" >> $GITHUB_ENV
+          echo 'githubRepository=${{ fromJSON(inputs.githubContext).repository }}' >> $GITHUB_ENV
+          echo "githubRepositoryName=$githubRepositoryName" >> $GITHUB_ENV
+      -
+        name: Checkout target repository
+        uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          repository: ${{ env.githubRepository }}
+          ref: ${{ env.branch }}
+          token: ${{ secrets.REPO_READONLY_PAT }}
+      -
+        name: Checkout chart repository
+        if: inputs.useChartMuseum == false
+        uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          repository: flmorg/universal-chart
+          token: ${{ secrets.REPO_READONLY_PAT }}
+          path: universal-chart
+      # - 
+      #   name: Replace secrets in values.yaml
+      #   working-directory: chart
+      #   timeout-minutes: 1
+      #   run: |
+      #     originalfile="values.yaml"
+      #     tmpfile=$(mktemp)
+      #     cp --attributes-only --preserve $originalfile $tmpfile
+      #     envsubst "$(env | sed -e 's/=.*//' -e 's/^/\$/g')" < $originalfile > $tmpfile
+      #     mv $tmpfile $originalfile
+      - 
+        name: Install helm
+        timeout-minutes: 2
+        run: |
+          sudo snap install helm --classic
+      # -
+      #   name: Set KUBECONFIG
+      #   working-directory: chart
+      #   timeout-minutes: 1
+      #   run: |
+      #     touch kubeconfig
+      #     echo '${{ secrets.KUBECONFIG }}' >> kubeconfig
+      #     echo "KUBECONFIG=./kubeconfig" >> $GITHUB_ENV
+      -
+        name: Package chart
+        if: inputs.useChartMuseum == false
+        working-directory: universal-chart/src
+        timeout-minutes: 1
+        run: |
+          helm package . --version 1.0.0 --destination ./../tmp
+          echo 'chartName=${{ github.workspace }}/universal-chart/tmp/universal-chart-1.0.0.tgz' >> $GITHUB_ENV
+      -
+        name: Fetch chart
+        if: inputs.useChartMuseum == true
+        working-directory: chart
+        timeout-minutes: 1
+        run: |
+          helm repo add chartmuseum https://charts.mariusne.com
+          helm repo update
+          echo "chartName=chartmuseum/universal-chart" >> $GITHUB_ENV
+      - name: Create kubeconfig
+        id: kubeconfig
+        uses: timheuer/base64-to-file@v1.2
+        with:
+          fileName: './kubeconfig'
+          encodedString: ${{ secrets.KUBECONFIG }}
+      -
+        name: Upgrade chart
+        working-directory: chart
+        timeout-minutes: 5
+        env:
+          KUBECONFIG: ${{ steps.kubeconfig.outputs.filePath }}
+        run: |
+          helm upgrade ${{ env.githubRepositoryName }} ${{ env.chartName }} \
+          --kubeconfig $KUBECONFIG \
+          --install \
+          --namespace ${{ env.githubRepositoryName }} \
+          --create-namespace \
+          --version=^1.0.0 \
+          --values=./values.yaml \
+          --set forceRedeploy=${{ inputs.forceRedeploy }} \
+          --debug
+          # --wait
