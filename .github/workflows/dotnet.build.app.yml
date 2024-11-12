@@ -40,36 +40,27 @@ jobs:
           latestDockerTag=""
           commitDockerTag=""
           versionDockerTag=""
-          releaseVersion=${${{ fromJSON(inputs.githubContext).ref }}##*/}
-          appVersion=${releaseVersion#v}
 
-          # Determine if this run is for the main branch or another branch
-          if [[ -z "$githubHeadRef" ]]; then
-            # Main branch or direct push
-
-            githubRef=${{ env.githubRef }}
-
-            if [[ ! "$githubRef" =~ ^"refs/tags/" ]]; then
-              echo 'Pipeline triggered on the main branch, but no tag has been provided'
-              exit 1
-            fi
-
-            # is_tag=${{ startsWith(inputs.githubContext.ref, 'refs/tags/') }}
-            # if [ "$is_tag" != "true" ]; then
-            #   echo 'Pipeline triggered on the main branch, but no tag has been provided'
-            #   exit 1
-            # fi
-
+          if [[ "$githubRef" =~ ^"refs/tags/" ]]; then
             branch=${githubRef##*/}
             latestDockerTag="latest"
-            versionDockerTag=$appVersion
+            versionDockerTag=${branch#v}
+            commitDockerTag="${branch#v}-${{ env.githubSha }}"
           else
-            # Pull request
-            branch=$githubHeadRef
-            latestDockerTag="$branch"
+            # Determine if this run is for the main branch or another branch
+            if [[ -z "$githubHeadRef" ]]; then
+              # Main branch
+              githubRef=${{ env.githubRef }}
+              branch=${githubRef##*/}
+              latestDockerTag="$branch"
+              commitDockerTag="$branch-${{ env.githubSha }}"
+            else
+              # Pull request
+              branch=$githubHeadRef
+              latestDockerTag="$branch"
+              commitDockerTag="$branch-${{ env.githubSha }}"
+            fi
           fi
-
-          commitDockerTag="${branch}-${{ env.githubSha }}"
 
           # set env vars
           echo "latestDockerTag=$latestDockerTag" >> $GITHUB_ENV
@@ -83,9 +74,10 @@ jobs:
           echo $branch
 
           dockerTags="${{ inputs.dockerRepository }}:$latestDockerTag,${{ inputs.dockerRepository }}:$commitDockerTag"
-          if [ -n "${{ env.versionDockerTag }}" ]; then
+          if [ -n "$versionDockerTag" ]; then
             dockerTags="$dockerTags,${{ inputs.dockerRepository }}:$versionDockerTag"
           fi
+
           echo "dockerTags=$dockerTags" >> $GITHUB_ENV
 
           echo $dockerTags
