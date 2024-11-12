@@ -11,6 +11,10 @@ on:
         required: false
         type: string
         default: Executable
+      outputName:
+        required: false
+        type: string
+        default: Executable
       selfContained:
         required: false
         type: boolean
@@ -24,73 +28,63 @@ jobs:
   build_app:
     runs-on: ubuntu-latest
     steps:
-      -
-        name: Set github context
+
+      - name: Set github context
         timeout-minutes: 1
         run: |
           echo 'githubRepository=${{ fromJSON(inputs.githubContext).repository }}' >> $GITHUB_ENV
           echo 'githubSha=${{ fromJSON(inputs.githubContext).sha }}' >> $GITHUB_ENV
           echo 'githubRef=${{ fromJSON(inputs.githubContext).ref }}' >> $GITHUB_ENV
           echo 'githubHeadRef=${{ fromJSON(inputs.githubContext).head_ref }}' >> $GITHUB_ENV
-      -
-        name: Initialize build info
+
+      - name: Initialize build info
         timeout-minutes: 1
         run: |
           githubHeadRef=${{ env.githubHeadRef }}
           latestDockerTag=""
           commitDockerTag=""
           versionDockerTag=""
-          releaseVersion=${${{ fromJSON(inputs.githubContext).ref }}##*/}
-          appVersion=${releaseVersion#v}
 
-          # Determine if this run is for the main branch or another branch
-          if [[ -z "$githubHeadRef" ]]; then
-            # Main branch or direct push
-
-            githubRef=${{ env.githubRef }}
-
-            if [[ ! "$githubRef" =~ ^"refs/tags/" ]]; then
-              echo 'Pipeline triggered on the main branch, but no tag has been provided'
-              exit 1
-            fi
-
-            # is_tag=${{ startsWith(inputs.githubContext.ref, 'refs/tags/') }}
-            # if [ "$is_tag" != "true" ]; then
-            #   echo 'Pipeline triggered on the main branch, but no tag has been provided'
-            #   exit 1
-            # fi
-
+          if [[ "$githubRef" =~ ^"refs/tags/" ]]; then
             branch=${githubRef##*/}
             latestDockerTag="latest"
-            versionDockerTag=$appVersion
+            versionDockerTag=${branch#v}
+            commitDockerTag="${branch#v}-${{ env.githubSha }}"
           else
-            # Pull request
-            branch=$githubHeadRef
-            latestDockerTag="$branch"
+            # Determine if this run is for the main branch or another branch
+            if [[ -z "$githubHeadRef" ]]; then
+              # Main branch
+              githubRef=${{ env.githubRef }}
+              branch=${githubRef##*/}
+              latestDockerTag="$branch"
+              commitDockerTag="$branch-${{ env.githubSha }}"
+            else
+              # Pull request
+              branch=$githubHeadRef
+              latestDockerTag="$branch"
+              commitDockerTag="$branch-${{ env.githubSha }}"
+            fi
           fi
 
-          commitDockerTag="${branch}-${{ env.githubSha }}"
+          dockerTags=""
+          githubTags=""
+
+          if [ -n "$latestDockerTag" ]; then
+            dockerTags="$dockerTags,${{ inputs.dockerRepository }}:$latestDockerTag"
+            githubTags="$githubTags,ghcr.io/${{ env.githubRepository }}:$latestDockerTag"
+          fi
+
+          if [ -n "$versionDockerTag" ]; then
+            dockerTags="$dockerTags,${{ inputs.dockerRepository }}:$versionDockerTag"
+            githubTags="$githubTags,ghcr.io/${{ env.githubRepository }}:$versionDockerTag"
+          fi
 
           # set env vars
-          echo "latestDockerTag=$latestDockerTag" >> $GITHUB_ENV
-          echo "commitDockerTag=$commitDockerTag" >> $GITHUB_ENV
-          echo "versionDockerTag=$versionDockerTag" >> $GITHUB_ENV
           echo "branch=$branch" >> $GITHUB_ENV
-
-          echo $latestDockerTag
-          echo $commitDockerTag
-          echo $versionDockerTag
-          echo $branch
-
-          dockerTags="${{ inputs.dockerRepository }}:$latestDockerTag,${{ inputs.dockerRepository }}:$commitDockerTag"
-          if [ -n "${{ env.versionDockerTag }}" ]; then
-            dockerTags="$dockerTags,${{ inputs.dockerRepository }}:$versionDockerTag"
-          fi
           echo "dockerTags=$dockerTags" >> $GITHUB_ENV
+          echo "githubTags=$githubTags" >> $GITHUB_ENV
 
-          echo $dockerTags
-      -
-        name: Get vault secrets
+      - name: Get vault secrets
         uses: hashicorp/vault-action@v2
         with:
           url: ${{ secrets.VAULT_HOST }}
@@ -100,25 +94,25 @@ jobs:
           secrets:
             secrets/data/docker username | DOCKER_USERNAME;
             secrets/data/docker password | DOCKER_PASSWORD;
-            secrets/data/github repo_readonly_pat | REPO_READONLY_PAT
-      -
-        name: Checkout target repository
+            secrets/data/github repo_readonly_pat | REPO_READONLY_PAT;
+            secrets/data/github packages_pat | PACKAGES_PAT
+
+      - name: Checkout target repository
         uses: actions/checkout@v4
         timeout-minutes: 1
         with:
           repository: ${{ env.githubRepository }}
           ref: ${{ env.branch }}
           token: ${{ env.REPO_READONLY_PAT }}
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
         timeout-minutes: 5
-      -
-        name: Install emulators
-        run: |
-          docker run --privileged --rm tonistiigi/binfmt --install all
-      -
-        name: Create Dockerfile
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Create Dockerfile
         working-directory: code
         timeout-minutes: 2
         run: |
@@ -130,7 +124,8 @@ jobs:
           echo -e "EXPOSE 8080 \n" >> Dockerfile
           echo -e "COPY . ./ \n" >> Dockerfile
           # echo -e "RUN dotnet nuget add source --name dotnet8 https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/index.json" >> Dockerfile
-          # echo -e "RUN dotnet nuget add source --username Flaminel --password ${{ secrets.PACKAGES_PAT }} --store-password-in-clear-text --name github https://nuget.pkg.github.com/Flaminel/index.json" >> Dockerfile
+          echo -e "RUN dotnet nuget add source --username Flaminel --password ${{ secrets.PACKAGES_PAT }} --store-password-in-clear-text --name flm https://nuget.pkg.github.com/Flaminel/index.json" >> Dockerfile
+          echo -e "RUN dotnet nuget add source --username Flaminel --password ${{ secrets.PACKAGES_PAT }} --store-password-in-clear-text --name flmorg https://nuget.pkg.github.com/flmorg/index.json" >> Dockerfile
           echo -e "RUN dotnet publish "./${{ inputs.executableName }}/${{ inputs.executableName }}.csproj" \ " >> Dockerfile
           echo -e "-a \$TARGETARCH \ " >> Dockerfile
           echo -e "-c Release \ " >> Dockerfile
@@ -144,11 +139,11 @@ jobs:
             # echo -e "/p:PublishTrimmed=true \ " >> Dockerfile
             echo -e "/p:PublishSingleFile=true \n" >> Dockerfile
             echo -e "FROM mcr.microsoft.com/dotnet/runtime-deps:${{ inputs.baseImage }} \n" >> Dockerfile
-            entrypoint="ENTRYPOINT [\"./${{ inputs.executableName }}\"]"
+            entrypoint="ENTRYPOINT [\"./${{ inputs.outputName }}\"]"
           else
             echo -e "" >> Dockerfile
             echo -e "FROM mcr.microsoft.com/dotnet/aspnet:${{ inputs.baseImage }} \n" >> Dockerfile
-            entrypoint="ENTRYPOINT [\"dotnet\", \"${{ inputs.executableName }}.dll\"]"
+            entrypoint="ENTRYPOINT [\"dotnet\", \"${{ inputs.outputName }}.dll\"]"
           fi
 
           echo -e "WORKDIR /app" >> Dockerfile
@@ -156,19 +151,27 @@ jobs:
           echo -e "${entrypoint}" >> Dockerfile
 
           cat Dockerfile
-      -
-        name: Login to Docker Hub
+
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKER_USERNAME }}
           password: ${{ env.DOCKER_PASSWORD }}
-      -
-        name: Build and push docker image
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ fromJSON(inputs.githubContext).repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push docker image
         timeout-minutes: 15
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: ${{ github.workspace }}/code
           file: ${{ github.workspace }}/code/Dockerfile
+          provenance: false
           labels: |
             commit=sha-${{ env.githubSha }}
           outputs: |
@@ -177,4 +180,6 @@ jobs:
             linux/amd64
             linux/arm64
           push: true
-          tags: ${{ env.dockerTags }}
+          tags: |
+            ${{ env.dockerTags }}
+            ${{ env.githubTags }}
