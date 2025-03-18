@@ -26,7 +26,8 @@ jobs:
       - name: Set variables
         run: |
           repoFullName=${{ fromJSON(inputs.githubContext).repository }}
-          releaseVersion=${${{ fromJSON(inputs.githubContext).ref }}##*/}
+          ref=${{ fromJSON(inputs.githubContext).ref }}
+          releaseVersion=${ref##refs/tags/}
           appVersion=${releaseVersion#v}
 
           echo 'githubRepository=${{ fromJSON(inputs.githubContext).repository }}' >> $GITHUB_ENV
@@ -52,48 +53,86 @@ jobs:
           ref: main
           token: ${{ env.REPO_READONLY_PAT }}
       
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      
       - name: Install dependencies
         run: dotnet restore code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj
 
       - name: Build win-x64
-        run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime win-x64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-win-amd64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
+        run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime win-x64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-win-amd64 /p:PublishSingleFile=true /p:Version=${{ env.appVersion }}
 
-      - name: Build linux-x64
-        run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime linux-x64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-linux-amd64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
+      # - name: Build linux-x64
+      #   run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime linux-x64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-linux-amd64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
 
-      - name: Build linux-arm64
-        run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime linux-arm64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-linux-arm64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
+      # - name: Build linux-arm64
+      #   run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime linux-arm64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-linux-arm64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
         
-      - name: Build osx-x64
-        run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime osx-x64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-osx-amd64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
+      # - name: Build osx-x64
+      #   run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime osx-x64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-osx-amd64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
 
-      - name: Build osx-arm64
-        run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime osx-arm64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-osx-arm64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
+      # - name: Build osx-arm64
+      #   run: dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --runtime osx-arm64 --self-contained -o artifacts/${{ env.githubRepositoryName }}-osx-arm64 /p:PublishSingleFile=true /p:AssemblyVersion=${{ env.appVersion }}
+
+      - name: Start freebsd-x64
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          sync: nfs
+          arch: x86_64
+          prepare: |
+            pkg install -y icu libinotify libunwind wget
+
+      - name: Build freebsd-x64
+        shell: freebsd {0}
+        run: |
+          cd ~
+          wget -q https://github.com/Thefrank/dotnet-freebsd-crossbuild/releases/download/v9.0.104-amd64-freebsd-14/dotnet-sdk-9.0.104-freebsd-x64.tar.gz
+          export DOTNET_ROOT=$(pwd)/.dotnet
+          mkdir -p "$DOTNET_ROOT" && tar zxf dotnet-sdk-9.0.104-freebsd-x64.tar.gz -C "$DOTNET_ROOT"
+          export PATH=$PATH:$DOTNET_ROOT:$DOTNET_ROOT/tools
+          mkdir -p /tmp/nuget
+          wget -q -O /tmp/nuget/Microsoft.AspNetCore.App.Runtime.freebsd-x64.9.0.3.nupkg https://github.com/Thefrank/dotnet-freebsd-crossbuild/releases/download/v9.0.104-amd64-freebsd-14/Microsoft.AspNetCore.App.Runtime.freebsd-x64.9.0.3.nupkg
+          wget -q -O /tmp/nuget/Microsoft.NETCore.App.Host.freebsd-x64.9.0.3.nupkg https://github.com/Thefrank/dotnet-freebsd-crossbuild/releases/download/v9.0.104-amd64-freebsd-14/Microsoft.NETCore.App.Host.freebsd-x64.9.0.3.nupkg
+          wget -q -O /tmp/nuget/Microsoft.NETCore.App.Runtime.freebsd-x64.9.0.3.nupkg https://github.com/Thefrank/dotnet-freebsd-crossbuild/releases/download/v9.0.104-amd64-freebsd-14/Microsoft.NETCore.App.Runtime.freebsd-x64.9.0.3.nupkg
+          dotnet nuget add source /tmp/nuget
+
+          cd $GITHUB_WORKSPACE
+          dotnet publish code/${{ inputs.executableName }}/${{ inputs.executableName }}.csproj -c Release --self-contained -o artifacts/${{ env.githubRepositoryName }}-freebsd-x64 /p:PublishSingleFile=true /p:Version=${{ env.appVersion }}
 
       - name: Zip win-x64
         run: |
           cd ./artifacts
+          ls -lah ./${{ env.githubRepositoryName }}-win-amd64
           zip ./${{ env.githubRepositoryName }}-win-amd64.zip ./${{ env.githubRepositoryName }}-win-amd64/${{ env.githubRepositoryName }}.exe ./${{ env.githubRepositoryName }}-win-amd64/appsettings.json
 
-      - name: Zip linux-x64
-        run: |
-          cd ./artifacts
-          zip ./${{ env.githubRepositoryName }}-linux-amd64.zip ./${{ env.githubRepositoryName }}-linux-amd64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-linux-amd64/appsettings.json
+      # - name: Zip linux-x64
+      #   run: |
+      #     cd ./artifacts
+      #     zip ./${{ env.githubRepositoryName }}-linux-amd64.zip ./${{ env.githubRepositoryName }}-linux-amd64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-linux-amd64/appsettings.json
 
-      - name: Zip linux-arm64
-        run: |
-          cd ./artifacts
-          zip ./${{ env.githubRepositoryName }}-linux-arm64.zip ./${{ env.githubRepositoryName }}-linux-arm64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-linux-arm64/appsettings.json
+      # - name: Zip linux-arm64
+      #   run: |
+      #     cd ./artifacts
+      #     zip ./${{ env.githubRepositoryName }}-linux-arm64.zip ./${{ env.githubRepositoryName }}-linux-arm64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-linux-arm64/appsettings.json
 
-      - name: Zip osx-x64
-        run: |
-          cd ./artifacts
-          zip ./${{ env.githubRepositoryName }}-osx-amd64.zip ./${{ env.githubRepositoryName }}-osx-amd64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-osx-amd64/appsettings.json
+      # - name: Zip osx-x64
+      #   run: |
+      #     cd ./artifacts
+      #     zip ./${{ env.githubRepositoryName }}-osx-amd64.zip ./${{ env.githubRepositoryName }}-osx-amd64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-osx-amd64/appsettings.json
 
-      - name: Zip osx-arm64
+      # - name: Zip osx-arm64
+      #   run: |
+      #     cd ./artifacts
+      #     zip ./${{ env.githubRepositoryName }}-osx-arm64.zip ./${{ env.githubRepositoryName }}-osx-arm64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-osx-arm64/appsettings.json
+
+      - name: Zip freebsd-x64
         run: |
           cd ./artifacts
-          zip ./${{ env.githubRepositoryName }}-osx-arm64.zip ./${{ env.githubRepositoryName }}-osx-arm64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-osx-arm64/appsettings.json
+          ls -lah ./${{ env.githubRepositoryName }}-freebsd-x64
+          zip ./${{ env.githubRepositoryName }}-freebsd-x64.zip ./${{ env.githubRepositoryName }}-freebsd-x64/${{ env.githubRepositoryName }} ./${{ env.githubRepositoryName }}-freebsd-x64/appsettings.json
 
       - name: Release
         id: release
@@ -108,7 +147,4 @@ jobs:
           target_commitish: main
           files: |
             ./artifacts/${{ env.githubRepositoryName }}-win-amd64.zip
-            ./artifacts/${{ env.githubRepositoryName }}-linux-amd64.zip
-            ./artifacts/${{ env.githubRepositoryName }}-linux-arm64.zip
-            ./artifacts/${{ env.githubRepositoryName }}-osx-amd64.zip
-            ./artifacts/${{ env.githubRepositoryName }}-osx-arm64.zip
+            ./artifacts/${{ env.githubRepositoryName }}-freebsd-x64.zip
