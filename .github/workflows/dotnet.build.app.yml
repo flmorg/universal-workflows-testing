@@ -151,8 +151,6 @@ jobs:
           # add timezone data
           if [[ "${{ inputs.baseImage }}" == *"alpine"* ]]; then
             echo -e "RUN apk add --no-cache tzdata" >> Dockerfile
-            echo -e "RUN apk add musl-dev" >> Dockerfile
-            echo -e "RUN apk add build-base" >> Dockerfile
           else
             echo -e "RUN apt-get update && apt-get install -y tzdata && rm -rf /var/lib/apt/lists/*" >> Dockerfile
           fi
