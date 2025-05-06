@@ -22,7 +22,7 @@ on:
       baseImage:
         required: false
         type: string
-        default: 8.0-alpine
+        default: 9.0-bookworm-slim
 
 jobs:
   build_app:
@@ -42,27 +42,25 @@ jobs:
         run: |
           githubHeadRef=${{ env.githubHeadRef }}
           latestDockerTag=""
-          commitDockerTag=""
           versionDockerTag=""
+          version="0.0.1"
 
           if [[ "$githubRef" =~ ^"refs/tags/" ]]; then
             branch=${githubRef##*/}
             latestDockerTag="latest"
             versionDockerTag=${branch#v}
-            commitDockerTag="${branch#v}-${{ env.githubSha }}"
+            version=${branch#v}
           else
             # Determine if this run is for the main branch or another branch
             if [[ -z "$githubHeadRef" ]]; then
               # Main branch
               githubRef=${{ env.githubRef }}
               branch=${githubRef##*/}
-              latestDockerTag="$branch"
-              commitDockerTag="$branch-${{ env.githubSha }}"
+              versionDockerTag="$branch"
             else
               # Pull request
               branch=$githubHeadRef
-              latestDockerTag="$branch"
-              commitDockerTag="$branch-${{ env.githubSha }}"
+              versionDockerTag="$branch"
             fi
           fi
 
@@ -83,6 +81,8 @@ jobs:
           echo "branch=$branch" >> $GITHUB_ENV
           echo "dockerTags=$dockerTags" >> $GITHUB_ENV
           echo "githubTags=$githubTags" >> $GITHUB_ENV
+          echo "versionDockerTag=$versionDockerTag" >> $GITHUB_ENV
+          echo "version=$version" >> $GITHUB_ENV
 
       - name: Get vault secrets
         uses: hashicorp/vault-action@v2
@@ -121,15 +121,17 @@ jobs:
           echo -e "FROM --platform=\$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:${{ inputs.baseImage }} AS build" >> Dockerfile
           echo -e "ARG TARGETARCH" >> Dockerfile
           echo -e "WORKDIR /app" >> Dockerfile
-          echo -e "EXPOSE 8080 \n" >> Dockerfile
+          echo -e "EXPOSE 8080" >> Dockerfile
           echo -e "COPY . ./ \n" >> Dockerfile
+
           # echo -e "RUN dotnet nuget add source --name dotnet8 https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/index.json" >> Dockerfile
           echo -e "RUN dotnet nuget add source --username Flaminel --password ${{ secrets.PACKAGES_PAT }} --store-password-in-clear-text --name flm https://nuget.pkg.github.com/Flaminel/index.json" >> Dockerfile
           echo -e "RUN dotnet nuget add source --username Flaminel --password ${{ secrets.PACKAGES_PAT }} --store-password-in-clear-text --name flmorg https://nuget.pkg.github.com/flmorg/index.json" >> Dockerfile
           echo -e "RUN dotnet publish "./${{ inputs.executableName }}/${{ inputs.executableName }}.csproj" \ " >> Dockerfile
           echo -e "-a \$TARGETARCH \ " >> Dockerfile
           echo -e "-c Release \ " >> Dockerfile
-          echo -n "-o /app/publish" >> Dockerfile
+          echo -e "-o /app/publish \ " >> Dockerfile
+          echo -n "/p:Version=${{ env.version }}" >> Dockerfile
 
           if [ "${{ inputs.selfContained }}" = true ] ; then
             echo -e " \ " >> Dockerfile
@@ -145,6 +147,20 @@ jobs:
             echo -e "FROM mcr.microsoft.com/dotnet/aspnet:${{ inputs.baseImage }} \n" >> Dockerfile
             entrypoint="ENTRYPOINT [\"dotnet\", \"${{ inputs.outputName }}.dll\"]"
           fi
+
+          # add timezone data
+          if [[ "${{ inputs.baseImage }}" == *"alpine"* ]]; then
+            echo -e "RUN apk add --no-cache tzdata" >> Dockerfile
+            echo -e "RUN apk add musl-dev" >> Dockerfile
+            echo -e "RUN apk add build-base" >> Dockerfile
+          else
+            echo -e "RUN apt-get update && apt-get install -y tzdata && rm -rf /var/lib/apt/lists/*" >> Dockerfile
+          fi
+
+          echo -e "ENV TZ=Etc/UTC" >> Dockerfile
+
+          # fix FileSystemWatcher in Docker: https://github.com/dotnet/dotnet-docker/issues/3546
+          echo -e "ENV DOTNET_USE_POLLING_FILE_WATCHER=true" >> Dockerfile
 
           echo -e "WORKDIR /app" >> Dockerfile
           echo -e "COPY --from=build /app/publish ." >> Dockerfile
@@ -174,6 +190,7 @@ jobs:
           provenance: false
           labels: |
             commit=sha-${{ env.githubSha }}
+            version=${{ env.versionDockerTag }}
           outputs: |
             type=image
           platforms: |
@@ -181,5 +198,4 @@ jobs:
             linux/arm64
           push: true
           tags: |
-            ${{ env.dockerTags }}
             ${{ env.githubTags }}
